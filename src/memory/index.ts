@@ -6,9 +6,22 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+
+// Import from our models
+import {
+  Entity,
+  Relation,
+  KnowledgeGraph,
+  AddObservationsParams,
+  SearchParams,
+} from './models/knowledge-graph';
+
+// Import storage and cache implementations
+import { Storage } from './storage';
+import { createStorage } from './storage/factory';
+import { createKnowledgeGraphCache } from './cache/lru-cache';
 
 // Define memory file path using environment variable with fallback
 const defaultMemoryPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'memory.json');
@@ -20,181 +33,210 @@ const MEMORY_FILE_PATH = process.env.MEMORY_FILE_PATH
     : path.join(path.dirname(fileURLToPath(import.meta.url)), process.env.MEMORY_FILE_PATH)
   : defaultMemoryPath;
 
-// We are storing our memory using entities, relations, and observations in a graph structure
-interface Entity {
-  name: string;
-  entityType: string;
-  observations: string[];
-}
+// Define database path using environment variable with fallback
+const defaultDbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'memory.db');
 
-interface Relation {
-  from: string;
-  to: string;
-  relationType: string;
-}
-
-interface KnowledgeGraph {
-  entities: Entity[];
-  relations: Relation[];
-}
+// If DB_PATH is just a filename, put it in the same directory as the script
+const DB_PATH = process.env.DB_PATH
+  ? path.isAbsolute(process.env.DB_PATH)
+    ? process.env.DB_PATH
+    : path.join(path.dirname(fileURLToPath(import.meta.url)), process.env.DB_PATH)
+  : defaultDbPath;
 
 // The KnowledgeGraphManager class contains all operations to interact with the knowledge graph
 class KnowledgeGraphManager {
-  private async loadGraph(): Promise<KnowledgeGraph> {
-    try {
-      const data = await fs.readFile(MEMORY_FILE_PATH, "utf-8");
-      const lines = data.split("\n").filter(line => line.trim() !== "");
-      return lines.reduce((graph: KnowledgeGraph, line) => {
-        const item = JSON.parse(line);
-        if (item.type === "entity") graph.entities.push(item as Entity);
-        if (item.type === "relation") graph.relations.push(item as Relation);
-        return graph;
-      }, { entities: [], relations: [] });
-    } catch (error) {
-      if (error instanceof Error && 'code' in error && (error as any).code === "ENOENT") {
-        return { entities: [], relations: [] };
-      }
-      throw error;
-    }
+  private storage: Storage;
+  private cache: ReturnType<typeof createKnowledgeGraphCache>;
+  
+  constructor(storage: Storage) {
+    this.storage = storage;
+    this.cache = createKnowledgeGraphCache({
+      maxSize: Number(process.env.CACHE_SIZE) || 1000,
+      ttl: Number(process.env.CACHE_TTL) || 5 * 60 * 1000 // Default: 5 minutes
+    });
   }
 
-  private async saveGraph(graph: KnowledgeGraph): Promise<void> {
-    const lines = [
-      ...graph.entities.map(e => JSON.stringify({ type: "entity", ...e })),
-      ...graph.relations.map(r => JSON.stringify({ type: "relation", ...r })),
-    ];
-    await fs.writeFile(MEMORY_FILE_PATH, lines.join("\n"));
-  }
+  // Use the storage abstraction for all operations
 
   async createEntities(entities: Entity[]): Promise<Entity[]> {
-    const graph = await this.loadGraph();
-    const newEntities = entities.filter(e => !graph.entities.some(existingEntity => existingEntity.name === e.name));
-    graph.entities.push(...newEntities);
-    await this.saveGraph(graph);
-    return newEntities;
+    const result = await this.storage.createEntities(entities);
+    
+    // Invalidate the cache
+    this.cache.invalidate();
+    
+    return result;
   }
 
   async createRelations(relations: Relation[]): Promise<Relation[]> {
-    const graph = await this.loadGraph();
-    const newRelations = relations.filter(r => !graph.relations.some(existingRelation => 
-      existingRelation.from === r.from && 
-      existingRelation.to === r.to && 
-      existingRelation.relationType === r.relationType
-    ));
-    graph.relations.push(...newRelations);
-    await this.saveGraph(graph);
-    return newRelations;
+    const result = await this.storage.createRelations(relations);
+    
+    // Invalidate the cache
+    this.cache.invalidate();
+    
+    return result;
   }
 
-  async addObservations(observations: { entityName: string; contents: string[] }[]): Promise<{ entityName: string; addedObservations: string[] }[]> {
-    const graph = await this.loadGraph();
-    const results = observations.map(o => {
-      const entity = graph.entities.find(e => e.name === o.entityName);
-      if (!entity) {
-        throw new Error(`Entity with name ${o.entityName} not found`);
-      }
-      const newObservations = o.contents.filter(content => !entity.observations.includes(content));
-      entity.observations.push(...newObservations);
-      return { entityName: o.entityName, addedObservations: newObservations };
-    });
-    await this.saveGraph(graph);
-    return results;
+  async addObservations(observations: AddObservationsParams[]): Promise<{ entityName: string; addedObservations: string[] }[]> {
+    const result = await this.storage.addObservations(observations);
+    
+    // Invalidate the cache for affected entities
+    for (const observation of observations) {
+      this.cache.invalidateEntity(observation.entityName);
+    }
+    
+    return result;
   }
 
   async deleteEntities(entityNames: string[]): Promise<void> {
-    const graph = await this.loadGraph();
-    graph.entities = graph.entities.filter(e => !entityNames.includes(e.name));
-    graph.relations = graph.relations.filter(r => !entityNames.includes(r.from) && !entityNames.includes(r.to));
-    await this.saveGraph(graph);
+    await this.storage.deleteEntities(entityNames);
+    
+    // Invalidate the cache
+    this.cache.invalidate();
   }
 
   async deleteObservations(deletions: { entityName: string; observations: string[] }[]): Promise<void> {
-    const graph = await this.loadGraph();
-    deletions.forEach(d => {
-      const entity = graph.entities.find(e => e.name === d.entityName);
-      if (entity) {
-        entity.observations = entity.observations.filter(o => !d.observations.includes(o));
-      }
-    });
-    await this.saveGraph(graph);
+    await this.storage.deleteObservations(deletions);
+    
+    // Invalidate the cache for affected entities
+    for (const deletion of deletions) {
+      this.cache.invalidateEntity(deletion.entityName);
+    }
   }
 
   async deleteRelations(relations: Relation[]): Promise<void> {
-    const graph = await this.loadGraph();
-    graph.relations = graph.relations.filter(r => !relations.some(delRelation => 
-      r.from === delRelation.from && 
-      r.to === delRelation.to && 
-      r.relationType === delRelation.relationType
-    ));
-    await this.saveGraph(graph);
+    await this.storage.deleteRelations(relations);
+    
+    // Invalidate the cache
+    this.cache.invalidate();
   }
 
   async readGraph(): Promise<KnowledgeGraph> {
-    return this.loadGraph();
+    // Check the cache first
+    const cachedGraph = this.cache.getGraph();
+    if (cachedGraph) {
+      return cachedGraph;
+    }
+    
+    // Cache miss, get from storage
+    const graph = await this.storage.readGraph();
+    
+    // Cache the result
+    this.cache.setGraph(graph);
+    
+    return graph;
   }
 
-  // Very basic search function
   async searchNodes(query: string): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
+    // Check the cache first
+    const cachedResults = this.cache.getSearchResults(query);
+    if (cachedResults) {
+      return cachedResults;
+    }
     
-    // Filter entities
-    const filteredEntities = graph.entities.filter(e => 
-      e.name.toLowerCase().includes(query.toLowerCase()) ||
-      e.entityType.toLowerCase().includes(query.toLowerCase()) ||
-      e.observations.some(o => o.toLowerCase().includes(query.toLowerCase()))
-    );
-  
-    // Create a Set of filtered entity names for quick lookup
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
-  
-    // Filter relations to only include those between filtered entities
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-  
-    const filteredGraph: KnowledgeGraph = {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-  
-    return filteredGraph;
+    // Cache miss, get from storage
+    const results = await this.storage.searchNodes(query);
+    
+    // Cache the results
+    this.cache.setSearchResults(query, results);
+    
+    return results;
   }
 
   async openNodes(names: string[]): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
+    // Check the cache first
+    const cachedResults = this.cache.getNodeResults(names);
+    if (cachedResults) {
+      return cachedResults;
+    }
     
-    // Filter entities
-    const filteredEntities = graph.entities.filter(e => names.includes(e.name));
-  
-    // Create a Set of filtered entity names for quick lookup
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
-  
-    // Filter relations to only include those between filtered entities
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-  
-    const filteredGraph: KnowledgeGraph = {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-  
-    return filteredGraph;
+    // Cache miss, get from storage
+    const results = await this.storage.openNodes(names);
+    
+    // Cache the results
+    this.cache.setNodeResults(names, results);
+    
+    return results;
+  }
+
+  // New enhanced methods
+
+  async searchByEntityType(entityType: string): Promise<KnowledgeGraph> {
+    // Check the cache first
+    const cachedResults = this.cache.getEntityTypeResults(entityType);
+    if (cachedResults) {
+      return cachedResults;
+    }
+    
+    // Cache miss, get from storage
+    const results = await this.storage.searchByEntityType(entityType);
+    
+    // Cache the results
+    this.cache.setEntityTypeResults(entityType, results);
+    
+    return results;
+  }
+
+  async searchByObservation(observation: string): Promise<KnowledgeGraph> {
+    // Check the cache first
+    const cachedResults = this.cache.getObservationResults(observation);
+    if (cachedResults) {
+      return cachedResults;
+    }
+    
+    // Cache miss, get from storage
+    const results = await this.storage.searchByObservation(observation);
+    
+    // Cache the results
+    this.cache.setObservationResults(observation, results);
+    
+    return results;
+  }
+
+  async getRelationsBetween(fromEntity: string, toEntity: string): Promise<Relation[]> {
+    // Check the cache first
+    const cachedResults = this.cache.getRelationResults(fromEntity, toEntity);
+    if (cachedResults) {
+      return cachedResults;
+    }
+    
+    // Cache miss, get from storage
+    const results = await this.storage.getRelationsBetween(fromEntity, toEntity);
+    
+    // Cache the results
+    this.cache.setRelationResults(fromEntity, toEntity, results);
+    
+    return results;
+  }
+
+  async advancedSearch(params: SearchParams): Promise<KnowledgeGraph> {
+    // Check the cache first
+    const cachedResults = this.cache.getAdvancedSearchResults(params);
+    if (cachedResults) {
+      return cachedResults;
+    }
+    
+    // Cache miss, get from storage
+    const results = await this.storage.advancedSearch(params);
+    
+    // Cache the results
+    this.cache.setAdvancedSearchResults(params, results);
+    
+    return results;
   }
 }
 
-const knowledgeGraphManager = new KnowledgeGraphManager();
-
+// Create the storage implementation
+let knowledgeGraphManager: KnowledgeGraphManager;
 
 // The server instance and tools exposed to Claude
 const server = new Server({
   name: "memory-server",
   version: "1.0.0",
-},    {
-    capabilities: {
-      tools: {},
-    },
-  },);
+}, {
+  capabilities: {
+    tools: {},
+  },
+});
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
@@ -369,6 +411,55 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["names"],
         },
       },
+      // New enhanced tools
+      {
+        name: "search_by_entity_type",
+        description: "Search for entities by entity type",
+        inputSchema: {
+          type: "object",
+          properties: {
+            entityType: { type: "string", description: "The entity type to search for" },
+          },
+          required: ["entityType"],
+        },
+      },
+      {
+        name: "search_by_observation",
+        description: "Search for entities by observation content",
+        inputSchema: {
+          type: "object",
+          properties: {
+            observation: { type: "string", description: "The observation content to search for" },
+          },
+          required: ["observation"],
+        },
+      },
+      {
+        name: "get_relations_between",
+        description: "Get relations between two entities",
+        inputSchema: {
+          type: "object",
+          properties: {
+            fromEntity: { type: "string", description: "The source entity name" },
+            toEntity: { type: "string", description: "The target entity name" },
+          },
+          required: ["fromEntity", "toEntity"],
+        },
+      },
+      {
+        name: "advanced_search",
+        description: "Advanced search with multiple parameters",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "The search query" },
+            entityType: { type: "string", description: "The entity type to filter by (optional)" },
+            limitEntities: { type: "number", description: "Maximum number of entities to return (optional)" },
+            limitRelations: { type: "number", description: "Maximum number of relations to return (optional)" },
+          },
+          required: ["query"],
+        },
+      },
     ],
   };
 });
@@ -380,13 +471,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new Error(`No arguments provided for tool: ${name}`);
   }
 
+  // Ensure we have initialized the storage and knowledge graph manager
+  if (!knowledgeGraphManager) {
+    throw new Error("Knowledge graph manager not initialized");
+  }
+
   switch (name) {
     case "create_entities":
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.createEntities(args.entities as Entity[]), null, 2) }] };
     case "create_relations":
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.createRelations(args.relations as Relation[]), null, 2) }] };
     case "add_observations":
-      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.addObservations(args.observations as { entityName: string; contents: string[] }[]), null, 2) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.addObservations(args.observations as AddObservationsParams[]), null, 2) }] };
     case "delete_entities":
       await knowledgeGraphManager.deleteEntities(args.entityNames as string[]);
       return { content: [{ type: "text", text: "Entities deleted successfully" }] };
@@ -402,15 +498,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.searchNodes(args.query as string), null, 2) }] };
     case "open_nodes":
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.openNodes(args.names as string[]), null, 2) }] };
+    // New enhanced tools
+    case "search_by_entity_type":
+      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.searchByEntityType(args.entityType as string), null, 2) }] };
+    case "search_by_observation":
+      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.searchByObservation(args.observation as string), null, 2) }] };
+    case "get_relations_between":
+      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.getRelationsBetween(args.fromEntity as string, args.toEntity as string), null, 2) }] };
+    case "advanced_search":
+      return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.advancedSearch(args as SearchParams), null, 2) }] };
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 });
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Knowledge Graph MCP Server running on stdio");
+  try {
+    console.error("Initializing Memory MCP Server...");
+    
+    // Initialize storage
+    console.error(`Using memory file: ${MEMORY_FILE_PATH}`);
+    console.error(`Using database: ${DB_PATH}`);
+    console.error(`Storage type: ${process.env.STORAGE_TYPE || 'combined'}`);
+    
+    const storage = await createStorage({
+      filePath: MEMORY_FILE_PATH,
+      dbPath: DB_PATH,
+      storageType: (process.env.STORAGE_TYPE || 'combined') as any,
+    });
+    
+    // Initialize knowledge graph manager
+    knowledgeGraphManager = new KnowledgeGraphManager(storage);
+    
+    // Log startup information
+    console.error("Memory MCP Server initialized successfully");
+    console.error("Starting server with enhanced performance and features:");
+    console.error("- SQLite database storage");
+    console.error("- LRU caching");
+    console.error("- Full-text search");
+    console.error("- Advanced querying");
+    
+    // Start the server
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("Memory MCP Server running on stdio");
+  } catch (error) {
+    console.error("Error initializing Memory MCP Server:", error);
+    process.exit(1);
+  }
 }
 
 main().catch((error) => {
