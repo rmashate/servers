@@ -1,7 +1,7 @@
 {
   "name": "@modelcontextprotocol/server-memory",
-  "version": "0.8.0",
-  "description": "MCP server for enabling memory for Claude through a knowledge graph with performance optimizations",
+  "version": "0.7.0",
+  "description": "MCP server for enabling memory for Claude through a knowledge graph with optimized database storage and caching",
   "license": "MIT",
   "author": "Anthropic, PBC (https://anthropic.com)",
   "homepage": "https://modelcontextprotocol.io",
@@ -24,17 +24,9 @@
     "lru-cache": "^10.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.9",
+    "@types/better-sqlite3": "^7.6.6",
     "@types/node": "^22",
     "shx": "^0.3.4",
     "typescript": "^5.6.2"
-  },
-  "keywords": [
-    "knowledge-graph",
-    "memory",
-    "claude",
-    "mcp",
-    "sqlite",
-    "performance"
-  ]
+  }
 }
