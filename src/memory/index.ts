@@ -516,32 +516,28 @@ async function main() {
   try {
     console.error("Initializing Memory MCP Server...");
     
-    // Initialize storage
-    console.error(`Using memory file: ${MEMORY_FILE_PATH}`);
-    console.error(`Using database: ${DB_PATH}`);
-    console.error(`Storage type: ${process.env.STORAGE_TYPE || 'combined'}`);
-    
+    // Create the storage implementation
     const storage = await createStorage({
       filePath: MEMORY_FILE_PATH,
       dbPath: DB_PATH,
-      storageType: (process.env.STORAGE_TYPE || 'combined') as any,
+      storageType: (process.env.STORAGE_TYPE || 'combined') as 'file' | 'db' | 'combined'
     });
     
-    // Initialize knowledge graph manager
+    // Initialize the storage
+    await storage.initialize();
+    
+    // Create the knowledge graph manager
     knowledgeGraphManager = new KnowledgeGraphManager(storage);
     
-    // Log startup information
-    console.error("Memory MCP Server initialized successfully");
-    console.error("Starting server with enhanced performance and features:");
-    console.error("- SQLite database storage");
-    console.error("- LRU caching");
-    console.error("- Full-text search");
-    console.error("- Advanced querying");
+    console.error("Memory MCP Server initialized successfully!");
+    console.error(`- Using storage type: ${process.env.STORAGE_TYPE || 'combined'}`);
+    console.error(`- File path: ${MEMORY_FILE_PATH}`);
+    console.error(`- Database path: ${DB_PATH}`);
     
-    // Start the server
+    // Connect to the transport
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("Memory MCP Server running on stdio");
+    console.error("Knowledge Graph MCP Server running on stdio");
   } catch (error) {
     console.error("Error initializing Memory MCP Server:", error);
     process.exit(1);
