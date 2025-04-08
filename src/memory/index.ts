@@ -514,22 +514,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 async function main() {
   try {
-    console.error("Initializing storage...");
+    console.error("Initializing Knowledge Graph MCP Server...");
     
-    // Create storage with options from environment variables
+    // Create storage
     const storage = await createStorage({
       filePath: MEMORY_FILE_PATH,
       dbPath: DB_PATH,
       storageType: process.env.STORAGE_TYPE as any || 'combined'
     });
     
-    // Initialize the knowledge graph manager
+    // Initialize knowledge graph manager
     knowledgeGraphManager = new KnowledgeGraphManager(storage);
     
-    console.error("Storage initialized successfully");
-    console.error(`Using file path: ${MEMORY_FILE_PATH}`);
-    console.error(`Using database path: ${DB_PATH}`);
     console.error(`Using storage type: ${process.env.STORAGE_TYPE || 'combined'}`);
+    console.error(`File storage path: ${MEMORY_FILE_PATH}`);
+    console.error(`Database storage path: ${DB_PATH}`);
     
     // Connect to transport
     const transport = new StdioServerTransport();
@@ -537,7 +536,7 @@ async function main() {
     
     console.error("Knowledge Graph MCP Server running on stdio");
   } catch (error) {
-    console.error("Initialization error:", error);
+    console.error("Error initializing Knowledge Graph MCP Server:", error);
     process.exit(1);
   }
 }
