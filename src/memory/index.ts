@@ -498,7 +498,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.searchNodes(args.query as string), null, 2) }] };
     case "open_nodes":
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.openNodes(args.names as string[]), null, 2) }] };
-    // New enhanced tools
+    // New enhanced tool handlers
     case "search_by_entity_type":
       return { content: [{ type: "text", text: JSON.stringify(await knowledgeGraphManager.searchByEntityType(args.entityType as string), null, 2) }] };
     case "search_by_observation":
@@ -514,32 +514,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 async function main() {
   try {
-    console.error("Initializing Memory MCP Server...");
+    console.error("Initializing storage...");
     
-    // Create the storage implementation
+    // Create storage with options from environment variables
     const storage = await createStorage({
       filePath: MEMORY_FILE_PATH,
       dbPath: DB_PATH,
-      storageType: (process.env.STORAGE_TYPE || 'combined') as 'file' | 'db' | 'combined'
+      storageType: process.env.STORAGE_TYPE as any || 'combined'
     });
     
-    // Initialize the storage
-    await storage.initialize();
-    
-    // Create the knowledge graph manager
+    // Initialize the knowledge graph manager
     knowledgeGraphManager = new KnowledgeGraphManager(storage);
     
-    console.error("Memory MCP Server initialized successfully!");
-    console.error(`- Using storage type: ${process.env.STORAGE_TYPE || 'combined'}`);
-    console.error(`- File path: ${MEMORY_FILE_PATH}`);
-    console.error(`- Database path: ${DB_PATH}`);
+    console.error("Storage initialized successfully");
+    console.error(`Using file path: ${MEMORY_FILE_PATH}`);
+    console.error(`Using database path: ${DB_PATH}`);
+    console.error(`Using storage type: ${process.env.STORAGE_TYPE || 'combined'}`);
     
-    // Connect to the transport
+    // Connect to transport
     const transport = new StdioServerTransport();
     await server.connect(transport);
+    
     console.error("Knowledge Graph MCP Server running on stdio");
   } catch (error) {
-    console.error("Error initializing Memory MCP Server:", error);
+    console.error("Initialization error:", error);
     process.exit(1);
   }
 }
